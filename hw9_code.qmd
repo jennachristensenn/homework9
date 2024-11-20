@@ -1,0 +1,509 @@
+---
+title: "More Modeling"
+format: html
+editor: visual
+author: Jenna Christensen
+---
+
+```{r, warning = FALSE, message = FALSE}
+library(tidyverse)
+library(lubridate)
+library(tidymodels)
+library(workflows)
+library(glmnet)
+library(tree)
+library(rpart)
+library(rpart.plot)
+library(baguette)
+library(ranger)
+```
+
+## Reading in Data
+
+Here I am using encoding = "latin1" to deal with the file that includes non-ASCII characters such as "Temperature(캜)".
+```{r}
+bike_data <- readr::read_csv("SeoulBikeData.csv", locale = readr::locale(encoding = "latin1"))
+```
+
+Adjusting the date format and inspecting column values
+```{r}
+bike_data <- bike_data |>
+mutate(date = lubridate::dmy(Date)) |>
+select(-Date)
+
+summary(bike_data)
+
+```
+
+Turning variables into factors
+```{r}
+bike_data <- bike_data |>
+mutate(seasons = factor(Seasons),
+holiday = factor(Holiday),
+fn_day = factor(`Functioning Day`)) |>
+select(-Seasons, -Holiday, -`Functioning Day`)
+
+```
+
+Renaming variables
+```{r}
+bike_data <- bike_data |>
+rename('bike_count' = `Rented Bike Count`,
+'hour' = "Hour",
+"temp" = `Temperature(°C)`,
+"wind_speed" = `Wind speed (m/s)`,
+"humidity" = `Humidity(%)`,
+"vis" = `Visibility (10m)`,
+"dew_point_temp" = `Dew point temperature(°C)`,
+"solar_radiation" = `Solar Radiation (MJ/m2)`,
+"rainfall" = "Rainfall(mm)",
+"snowfall" = `Snowfall (cm)`)
+```
+
+Removing days where they aren't in operation
+```{r}
+bike_data <- bike_data |>
+filter(fn_day == "Yes") |>
+select(-fn_day)
+```
+
+Summarizing across the hours so each day has one observation
+```{r}
+bike_data <- bike_data |>
+  group_by(date, seasons, holiday) |>
+  summarize(bike_count = sum(bike_count),
+            temp = mean(temp),
+            humidity = mean(humidity),
+            wind_speed = mean(wind_speed),
+            vis = mean(vis),
+            dew_point_temp = mean(dew_point_temp),
+            solar_radiation = mean(solar_radiation),
+            rainfall = sum(rainfall),
+            snowfall = sum(snowfall)) |>
+  ungroup()
+bike_data
+```
+
+
+## EDA
+
+Checking for missing values, there does not appear to be any.
+```{r}
+sum_na <- function(column){
+ sum(is.na(column))
+}
+na_counts <- bike_data |>
+ summarize(across(everything(), sum_na))
+
+na_counts
+```
+
+Basic summary stats for numeric variables focusing on bike_count. 
+```{r}
+bike_data |>
+summarize(across(`bike_count`,.fns = c("mean" = mean,
+                                       "median" = median,
+                                       "sd" = sd,
+                                       "IQR" = IQR,
+                                       "min" = min,
+                                       "max" = max),
+.names = "{.col}_{.fn}"))
+
+```
+
+Looking at different groupings.
+```{r}
+bike_data |>
+group_by(seasons, holiday) |>
+summarize(across(`bike_count`,
+.fns = c("mean" = mean,
+"median" = median,
+"sd" = sd,
+"IQR" = IQR,
+"min" = min,
+"max" = max),
+.names = "{.col}_{.fn}"))
+```
+
+Exploring correlation -- There are a few variables like temp and dew_point that are highly correlated.
+```{r}
+bike_data |>
+select(where(is.numeric)) |>
+cor() |>
+round(3)
+
+```
+
+Exploring plots to see relationships. It makes sense that we see the most bikes being rented in summer months.
+
+```{r}
+ggplot(bike_data, aes(x = temp, y = bike_count)) +
+geom_jitter(aes(color = seasons)) +
+facet_grid(~holiday)
+
+ggplot(bike_data, aes(x = solar_radiation, y = bike_count)) +
+geom_point(aes(color = seasons)) +
+facet_grid(~holiday)
+
+```
+
+## Splitting the Data
+
+Using functions from tidymodels to split the data and add in the stratification. Then applying 10-fold cross validation to the training set.
+```{r}
+set.seed(10)
+bike_split <- initial_split(bike_data, prop = 0.75, strata = seasons)
+bike_train <- training(bike_split)
+bike_test <- testing(bike_split)
+bike_10_fold <- vfold_cv(bike_train, 10)
+```
+
+Creating the first recipe.
+```{r}
+bike_recipe1 <- recipe(bike_count ~ ., data = bike_train) |>
+  step_date(date, features = "dow") |>
+  step_mutate(day_type = factor(if_else(date_dow %in% c("Sat", "Sun"), "Weekend", "Weekday"))) |>
+  step_rm(date, date_dow) |>
+  step_dummy(seasons, holiday, day_type) |>
+  step_normalize(all_numeric(), -bike_count) 
+
+bike_recipe1
+```
+
+## Fitting MLR Model
+
+Setting up the linear model fit and fitting the models to determine best performance. 
+```{r}
+bike_mlr <- linear_reg() |>
+  set_engine("lm")
+
+mlr_wfl <- workflow() |>
+  add_recipe(bike_recipe1) |>
+  add_model(bike_mlr) 
+ 
+mlr_fit <- mlr_wfl |>
+   fit_resamples(bike_10_fold)
+  
+
+mlr_fit |> collect_metrics()
+
+
+mlr_final <- mlr_wfl |>
+  fit(bike_train)
+tidy(mlr_final)
+
+```
+
+## Fitting LASSO Model
+
+Setting up the LASSO model and using penalty = tune() to choose the parameter
+```{r}
+bike_lasso <- linear_reg(penalty = tune(), mixture = 1) |>
+  set_engine("glmnet")
+
+lasso_wfl <- workflow() |>
+  add_recipe(bike_recipe1) |>
+  add_model(bike_lasso)
+
+lasso_wfl
+```
+
+Fitting the model with the tuning parameter.
+```{r}
+lasso_grid <- lasso_wfl |>
+  tune_grid(resamples = bike_10_fold,
+            grid = grid_regular(penalty(), levels = 200)) 
+
+lasso_grid[1, ".metrics"][[1]]
+```
+
+Examining the rmse values and plotting them to find the best selection. From discussion post, it doesn't seem like the flat line on the plot is an issue.
+```{r}
+lasso_grid |>
+  collect_metrics() |>
+  filter(.metric == "rmse")
+
+lasso_grid |>
+  collect_metrics() |>
+  filter(.metric == "rmse") |>
+  ggplot(aes(penalty, mean, color = .metric)) +
+  geom_line()
+```
+
+Selecting the best model and finalizing the workflow
+```{r}
+lowest_rmse <- lasso_grid |>
+  select_best(metric = "rmse")
+lowest_rmse
+
+lasso_wfl |>
+  finalize_workflow(lowest_rmse)
+```
+
+Fitting on entire training set
+```{r}
+lasso_final <- lasso_wfl |>
+  finalize_workflow(lowest_rmse) |>
+  fit(bike_train)
+tidy(lasso_final)
+```
+
+## Fitting Regression Tree Model
+
+Setting up the regression tree model and tuning parameters
+```{r}
+bike_reg <- decision_tree(tree_depth = tune(),
+                           min_n = 20,
+                           cost_complexity = tune()) |>
+  set_engine("rpart") |>
+  set_mode("regression")
+```
+
+Creating the workflow
+```{r}
+reg_wfl <- workflow() |>
+  add_recipe(bike_recipe1) |>
+  add_model(bike_reg)
+```
+
+Examining tuning parameters.
+```{r}
+reg_grid <- grid_regular(cost_complexity(),
+                         tree_depth(),
+                         levels = c(10, 5))
+
+reg_fits <- reg_wfl |> 
+  tune_grid(resamples = bike_10_fold,
+            grid = reg_grid)
+
+reg_fits |>
+  collect_metrics()
+```
+
+Finding the best value and selecting the models best tuning parameter values.
+```{r}
+reg_fits |>
+  collect_metrics() |>
+  filter(.metric == "rmse") |>
+  arrange( mean)
+
+reg_best_params <- select_best(reg_fits, metric = "rmse")
+reg_best_params
+```
+
+
+## Fitting Bagged Tree Model
+
+Setting up the bagged tree model and tuning parameters.
+```{r}
+bike_bag <- bag_tree(tree_depth = tune(),
+                           min_n = 20,
+                           cost_complexity = tune()) |>
+  set_engine("rpart") |>
+  set_mode("regression")
+```
+
+Setting up the workflow.
+```{r}
+bag_wfl <- workflow() |>
+ add_recipe(bike_recipe1) |>
+ add_model(bike_bag)
+```
+
+Fitting to cv folds
+```{r}
+bag_grid <- grid_regular(cost_complexity(),
+                         tree_depth(),
+                         levels = c(10, 5))
+
+bag_fits <- bag_wfl |> 
+  tune_grid(resamples = bike_10_fold,
+            grid = bag_grid)
+
+bag_fits |>
+  collect_metrics()
+```
+
+Finding the smallest rmse value and selecting the models best tuning parameter values.
+```{r}
+bag_fits |>
+  collect_metrics() |>
+  filter(.metric == "rmse") |>
+  arrange(mean)
+
+bag_best_params <- select_best(bag_fits, metric = "rmse")
+bag_best_params
+```
+
+
+## Fitting Random Forest Model
+
+Setting up the bagged tree model and tuning parameters.
+```{r}
+bike_for <- rand_forest(mtry = tune(),
+                        min_n = 20,)|>
+  set_engine("ranger", importance = "impurity") |>
+  set_mode("regression")
+```
+
+Setting up the workflow.
+```{r}
+for_wfl <- workflow() |>
+ add_recipe(bike_recipe1) |>
+ add_model(bike_for)
+```
+
+Fitting to cv folds
+```{r}
+for_grid <- grid_regular(
+  mtry(range = c(2, 15)),    
+  levels = 10)
+
+for_fits <- for_wfl |> 
+  tune_grid(resamples = bike_10_fold,
+            grid = for_grid)
+
+for_fits |>
+  collect_metrics()
+```
+
+Finding the smallest rmse value and selecting the models best tuning parameter values.
+```{r}
+for_fits |>
+  collect_metrics() |>
+  filter(.metric == "rmse") |>
+  arrange(mean)
+
+for_best_params <- select_best(for_fits, metric = "rmse")
+for_best_params
+```
+
+## Fitting each model on the test set
+
+MLR model
+```{r}
+mlr_wfl |>
+  last_fit(bike_split) |>
+  collect_metrics()
+
+mlr_final |>
+  predict(bike_test) |>
+  pull() |>
+  rmse_vec(truth = bike_test$bike_count)
+
+almost_usual_fit <- extract_fit_parsnip(mlr_final)
+usual_fit <- almost_usual_fit$fit
+summary(usual_fit)
+```
+
+LASSO Model
+```{r}
+lasso_wfl |>
+  finalize_workflow(lowest_rmse) |>
+  last_fit(bike_split) |>
+  collect_metrics()
+
+lasso_final |>
+  predict(bike_test) |>
+  pull() |>
+  rmse_vec(truth = bike_test$bike_count)
+
+tidy(lasso_final)
+```
+
+Regression Tree Model
+```{r}
+reg_final <- reg_wfl |>
+  finalize_workflow(reg_best_params)
+
+reg_fit <- reg_final |>
+  last_fit(bike_split)
+reg_fit
+
+reg_fit |>
+  collect_metrics()
+
+reg_final_model <- extract_fit_parsnip(reg_fit)
+reg_final_model
+
+# creating the regression tree plot
+reg_final_model %>%
+  extract_fit_engine() %>%
+  rpart.plot::rpart.plot(roundint = FALSE)
+```
+
+Bagged Tree Model
+```{r}
+bag_final <- bag_wfl |>
+  finalize_workflow(bag_best_params)
+
+bag_fit <- bag_final |>
+  last_fit(bike_split)
+bag_fit
+
+bag_fit |>
+  collect_metrics()
+
+bag_final_model <- extract_fit_parsnip(bag_fit)
+bag_final_model
+
+# creating the variable importance plot
+bag_importance_tib <- bag_final_model$fit$imp
+
+bag_importance_tib |>
+  mutate(term = factor(term, levels = rev(term))) |>
+  ggplot(aes(x = term, y = value)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(
+    title = "Variable Importance - Bagged Tree Model",
+    x = "Variables",
+    y = "Importance"
+  )
+```
+
+Random Forest Model
+```{r}
+for_final <- for_wfl |>
+  finalize_workflow(for_best_params)
+
+for_fit <- for_final |>
+  last_fit(bike_split)
+for_fit
+
+for_fit |>
+  collect_metrics()
+
+for_final_model <- extract_fit_parsnip(for_fit)
+for_final_model
+
+# creating the variable importance plot
+for_importance <- for_final_model$fit$variable.importance
+
+for_importance_tib <- tibble(
+  term = names(for_importance),
+  value = for_importance
+)
+
+for_importance_tib |>
+  mutate(term = factor(term, levels = rev(term))) |> 
+  ggplot(aes(x = term, y = value)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(
+    title = "Variable Importance - Random Forest Model",
+    x = "Variables",
+    y = "Importance"
+  )
+```
+
+After comparing the final models on the test set, the random forest model is the best to use. This model will be the one fit to the entire bike data set.
+```{r}
+full_data_fit <- for_final |> 
+  fit(bike_data)
+full_data_fit 
+
+full_data_model <- extract_fit_parsnip(full_data_fit)
+full_data_model
+```
+
