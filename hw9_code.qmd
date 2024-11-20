@@ -497,7 +497,7 @@ for_importance_tib |>
   )
 ```
 
-After comparing the final models on the test set, the random forest model is the best to use. This model will be the one fit to the entire bike data set.
+After comparing the final models on the test set, the random forest model is the best to use as it has the lowest rmse value. This model will be the one fit to the entire bike data set.
 ```{r}
 full_data_fit <- for_final |> 
   fit(bike_data)

@@ -850,7 +850,7 @@ Computational engine: glmnet </code></pre>
 <pre><code>There were issues with some computations   A: x1</code></pre>
 </div>
 <div class="cell-output cell-output-stderr">
-<pre><code>There were issues with some computations   A: x2</code></pre>
+<pre><code>There were issues with some computations   A: x3</code></pre>
 </div>
 <div class="cell-output cell-output-stderr">
 <pre><code>There were issues with some computations   A: x5</code></pre>
@@ -1255,7 +1255,7 @@ R squared (OOB):                  0.9086769 </code></pre>
 </div>
 </div>
 </div>
-<p>After comparing the final models on the test set, the random forest model is the best to use. This model will be the one fit to the entire bike data set.</p>
+<p>After comparing the final models on the test set, the random forest model is the best to use as it has the lowest rmse value. This model will be the one fit to the entire bike data set.</p>
 <div class="cell">
 <div class="sourceCode cell-code" id="cb121"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb121-1"><a href="#cb121-1" aria-hidden="true" tabindex="-1"></a>full_data_fit <span class="ot">&lt;-</span> for_final <span class="sc">|&gt;</span> </span>
 <span id="cb121-2"><a href="#cb121-2" aria-hidden="true" tabindex="-1"></a>  <span class="fu">fit</span>(bike_data)</span>
